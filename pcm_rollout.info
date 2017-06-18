@@ -1,0 +1,10 @@
+name = Open Signal PCM Rollout
+
+description = "Module for assisting in the rollout of the updated programming system for PCM in the first part of 2015"
+core = 7.x
+package = Open Signal PCM Community Media Advanced
+version = 7.x-1.0
+project = "pcm_rollout"
+project_status_url = https://github.com/cm-advanced/pcm_rollout
+
+files[] = pcm_rollout.module

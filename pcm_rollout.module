@@ -1,0 +1,487 @@
+<?php
+
+
+/**
+ * This function will turn off a list of modules
+ */
+function pcm_rollout_module_turn_off() {
+  /////////////////////////////////////////////////////////////////////////////
+  //modules that need to be turned off
+  $turn_off_modules = array(
+			    );
+  
+  
+  module_disable($turn_off_modules);
+  drupal_uninstall_modules($turn_off_modules);
+}
+
+/**
+ * function runs a data patch for field collections so that the play nice
+ * with features
+ */
+function pcm_rollout_field_collection_data_patch() {
+  /////////////////////////////////////////////////////////////////////////////
+  //field_collection has a bug that affects feature updates
+  //https://www.drupal.org/node/2141781
+   $result = db_query("SELECT id, data from field_config ".
+		      "WHERE type = 'field_collection'");
+   foreach ($result as $field) {
+     $data = unserialize($field->data);
+     $data['indexes'] = array('revision_id' => array('revision_id'));
+     $data = serialize($data);
+     db_query("update field_config set data = :data where id = :id", 
+	      array(':data' => $data, ':id'=> $field->id));
+   }
+}
+
+/**
+ * function will swap out the show field for airing from node reference
+ * to entity reference
+ */
+function pcm_rollout_airing_show_field_type_change() {
+  $temp_field_name = 'field_airing_temp_show_ref';
+  $field_name = 'field_airing_show_ref';
+
+  //fetch current field
+  $field = field_info_field($field_name);
+  
+  $field_type = $field['type'];
+
+  //check type
+  if ($field_type == 'entityreference') {
+    drupal_set_message($field_name . " is already entity reference!",
+		       'error');
+    return;
+  }
+
+  //create temp field
+  //make sure field doesn't exist yet
+  $temp_field = field_info_field($temp_field_name);
+
+  if ($temp_field) {
+    drupal_set_message('Field exists already! '.$temp_field_name, 'error');
+    return;
+  }
+
+  //create temp field
+  $temp_field = pcm_rollout_get_entity_ref_field($temp_field_name);
+  field_create_field($temp_field);
+
+  $temp_field = field_info_field($temp_field_name);
+  if (!$temp_field) {
+    drupal_set_message('did not find field: ' . $temp_field_name);
+    return;
+  }
+  $temp_field_id = $temp_field['id'];
+
+  //create temp field instance on airing
+  $temp_instance = pcm_rollout_get_entity_ref_instance($temp_field_name, 
+						       $temp_field_id);
+  field_create_instance($temp_instance);
+  
+
+  //move data from old field to temp field
+  $sql = 
+    "INSERT INTO field_data_" . $temp_field_name . "
+     (entity_type, bundle, deleted, entity_id , revision_id , language , 
+     delta, " . $temp_field_name . "_target_id ) 
+     SELECT entity_type, bundle, deleted, entity_id , revision_id , language , 
+     delta, " . $field_name . "_nid 
+     FROM field_data_" . $field_name;
+  db_query($sql);
+  
+  //delete old field
+  field_delete_field($field_name);
+  field_purge_batch(10);
+
+  //create new field and instance
+  $field = pcm_rollout_get_entity_ref_field($field_name);
+  field_create_field($field);
+  $field = field_info_field($field_name);
+  if (!$field) {
+    drupal_set_message('did not find field: ' . $field_name);
+    return;
+  }
+
+  $field_id = $field['id'];
+
+  $instance = pcm_rollout_get_entity_ref_instance($field_name, $field_id);
+  field_create_instance($instance);
+  
+
+  //copy data from temp field to the new permanant field  
+  $sql = 
+    "INSERT INTO field_data_" . $field_name . " 
+     (entity_type, bundle, deleted, entity_id , revision_id , language , 
+      delta, " . $field_name . "_target_id) 
+     SELECT entity_type, bundle, deleted, entity_id , revision_id , language , 
+     delta, " . $temp_field_name . "_target_id 
+     FROM field_data_" . $temp_field_name;
+
+  db_query($sql);
+
+  //delete the temp field
+  field_delete_field($temp_field_name);
+  field_purge_batch(10);
+}
+
+
+/**
+ * Function returns the array necessary to create an instance
+ * of a Field and attach it to an airing
+ */
+function pcm_rollout_get_entity_ref_instance($field_name, $field_id) {
+  $ret = 
+    array(
+	  'default_value' => NULL,
+	  'description' => '',
+	  'display' => 
+	  array(
+		'default' => 
+		array(
+		      'label' => 'inline',
+		      'type' => 'entityreference_label',
+		      'weight' => 3,
+		      'settings' => 
+		      array(
+			    'link' => 1,
+			    ),
+		      'module' => 'entityreference',
+		      ),
+		),
+	  'label' => 'Show',
+	  'required' => 0,
+	  'settings' => 
+	  array(
+		'user_register_form' => FALSE,
+		),
+	  'widget' => 
+	  array(
+		'active' => 1, 
+		'module' => 'entityreference',
+		'settings' => 
+		array( 
+		      'match_operator' => 'CONTAINS',
+		      'path' => '',
+		      'size' => 60,
+		       ),
+		'type' => 'entityreference_autocomplete',
+		'weight' => 6,
+		),
+	  'field_id' => $field_id,
+	  'field_name' => $field_name,
+	  'entity_type' => 'airing',
+	  'bundle' => 'airing',
+	  'deleted' => '0',
+		 
+	  );
+  return $ret;
+}
+
+/**
+ * Function returns the array necessary to create a Field
+ */
+function pcm_rollout_get_entity_ref_field($field_name) {
+  $ret = 
+    array(
+	  'translatable' => 0,
+	  'entity_types' => array( ),
+	  'settings' => 
+	  array(
+		'profile2_private' => FALSE,
+		'target_type'=> 'node',
+		'handler' => 'base',
+		'handler_settings' => 
+		array(
+		      'target_bundles' => array(
+						'cm_show'=>'cm_show'
+						),
+		      'sort' => array(
+				      'type'=>'none'
+				      ),
+		      'behaviors' => 
+		      array(
+			    'views-select-list' => array(
+							 'status' => 0,
+							 ),
+			    ),
+		      ),
+		),
+	  'storage' => array(
+			     'type' => 'field_sql_storage',
+			     'settings' => array(),
+			     'module' => 'field_sql_storage',
+			     'active' => 1,
+			     'details' => 
+			     array('sql' => 
+				   array('FIELD_LOAD_CURRENT' => 
+					 array('field_data_field_airing_show_ref' =>
+					       array('target_id' => 'field_airing_show_ref_target_id'),
+					       ),
+					 'FIELD_LOAD_REVISION' =>
+					 array('field_revision_field_airing_show_ref' =>
+					       array('target_id' => 'field_airing_show_ref_target_id'),
+					       ),
+					 ),
+				   ),
+			     ),
+	  'foreign keys' => 
+	  array(
+		'node' =>
+		array(
+		      'table' => 'node',
+		      'columns' => array('target_id' => 'nid'),
+		      ),
+		),
+	  'indexes' => array('target_id' => array(0 => 'target_id'),),
+	  'field_permissions' => array('type' => 0),
+	  'field_name' => $field_name,
+	  'type' => 'entityreference',
+	  'module' => 'entityreference',
+	  'active' => 1,
+	  'locked' => 0,
+	  'cardinality' => 1,
+	  'deleted' => 0,
+	  'columns' => array('target_id' => 
+			     array('description'=>'The id of the target entity.',
+				   'type'=>'int',
+				   'unsiged'=>TRUE,
+				   'not null'=>TRUE,
+				   ),
+			     ),
+	  'bundles' => array('airing'=>array(0=>'airing'),),
+	  
+	  );
+  return $ret;
+}
+
+/**
+ * This function is designd to run after all the features have been
+ * enabled
+ */
+function pcm_rollout_post_feature_enable($site) {
+  global $pcm_site;
+  $pcm_site = $site;
+
+  $actions = array(
+		   'pcm_rollout_delete_cm_show_field_instances',
+		   'pcm_rollout_delete_cm_project_field_instances',
+		   'pcm_rollout_delete_field_groups',
+		   'pcm_rollout_set_variables',
+		   'pcm_rollout_disable_menu_items',
+		   'pcm_rollout_hide_blocks',
+		   'pcm_rollout_turn_off_rules',
+		   );
+
+
+  foreach($actions as $action) {
+    $has_run = variable_get($action);
+    if (!$has_run || $has_run == 'no') {
+      call_user_func($action);
+      variable_set($action, 'yes');
+    }
+  }
+}
+
+/**
+ * FUNCTION WILL DISABLE A BUNCH OF MENU ITEMS
+ */
+function pcm_rollout_disable_menu_items() {
+
+  // The paths of links to disable
+  $paths = array(
+		'admin/projects/search',
+		'admin/projects/shows',
+		'admin/projects/manage',
+		);
+  $menu = 'management';
+
+  $mlids = db_query("SELECT mlid FROM {menu_links} WHERE menu_name = :menu", 
+		    array(':menu' => $menu))->fetchCol();
+  if ($mlids) {
+    // Loop through the matching menu items and update them.
+    foreach ($mlids as $mlid) {
+      if ($menu_link = menu_link_load($mlid)) {
+	if (in_array($menu_link['link_path'], $paths)) {
+	  $menu_link['hidden'] = 1;
+	  menu_link_save($menu_link);
+	}
+      }
+    }
+  }
+}
+
+function pcm_rollout_hide_blocks() {
+  $bids = array(215,218,222,233);
+  foreach ($bids as $bid) {
+    $sql = "UPDATE block SET region = -1 WHERE bid=".$bid;
+    db_query($sql);
+  }
+}
+/**
+ * FUNCTION WILL TURN OFF A BUNCH OF RULES
+ */
+function pcm_rollout_turn_off_rules() {
+  $array = array(
+		 'rules_live_show_notification',
+		 'rules_new_project_notification',
+		 'rules_new_project_notification_individuals_',
+		 'rules_new_series_project_add_to_group',
+		 'rules_shows_require_legal',
+		 );
+
+  foreach($array as $rule_name) {
+    $rules_config = rules_config_load($rule_name);
+    if ($rules_config) {
+      $rules_config->active = FALSE;
+      $rules_config->save();
+      print_r("Turned off $rule_name\n");
+    }
+  }
+}
+
+/**
+ * This function will delete a handful of field instances on cm_show
+ */
+function pcm_rollout_delete_cm_show_field_instances() {
+  print_r("Starting the deletions of show field instances.\n");
+
+  $fields = array(
+		  'field_format',
+		  'field_closed_captions',
+		  'field_in_point',
+		  'field_live',
+		  'field_live_source',
+		  'field_pbcore_fcc_ratings',       
+		  'field_season',                     
+
+		  );
+  foreach($fields as $field_name) {
+    if ($instance = field_info_instance('node', $field_name, 'cm_show')) {
+      field_delete_instance($instance);
+      print_r("Successfully deleted " . $field_name . " instance.\n");
+    }
+  }
+}
+
+
+/**
+ * This function will delete a handful of field instances on cm_project
+ */
+function pcm_rollout_delete_cm_project_field_instances() {
+  print_r("Starting the deletions of project field instances.\n");
+
+  $fields = array(
+		  'field_camera_checkout_q',
+		  'field_camera_request',
+		  'field_editing_session_q',
+		  'field_editing_request',
+		  'field_studio_session_q',
+		  'field_studio_request',
+		  'field_playback_preferences',
+		  'field_series_keep_schedule',
+		  'field_runtime',
+		  'field_pbcore_fcc_ratings',
+
+		  );
+  foreach($fields as $field_name) {
+    if ($instance = field_info_instance('node', $field_name, 'cm_project')) {
+      field_delete_instance($instance);
+      print_r("Successfully deleted " . $field_name . " instance.\n");
+    }
+  }
+}
+
+function pcm_rollout_delete_producer_dashboard_page() {
+  $sql = "UPDATE page_manager_pages set path = 'dashboard-old' WHERE pid=1";
+  print_r("Changing path of old dashboard to /dashboard-old\n");
+  db_query($sql);
+  
+  /*
+  module_load_include('inc', 'page_manager', 'plugins/tasks/page');
+  $pages = array(
+		 'dashboard',
+		 );
+  foreach ($pages as $name) {
+    $page = page_manager_page_load($name);
+    if (!empty($page)) {
+      page_manager_page_delete($page);
+    }
+  }
+  */
+}
+
+function pcm_rollout_delete_field_groups() {
+  $list = field_group_read_groups(array('bundle' => 'cm_project', 'entity_type' => 'node'));
+
+  $group = $list['node']['cm_project']['form']['group_post_production'];;
+  if ($group) {
+    print_r('Successfully deleted ' . $group->group_name."\n"); 
+    field_group_group_export_delete($group, FALSE);
+  }
+  else {
+    print_r('couldndt find post production!!!!!!!!!!!!!!!');
+  }
+
+  $list = field_group_read_groups(array('bundle' => 'cm_show', 'entity_type' => 'node'));
+
+  $groups = array(
+		  'group_details',
+		  'group_general',
+		  'group_playback',
+		  );
+  foreach($groups as $group_name) { 
+    $group = $list['node']['cm_show']['default'][$group_name];;
+    if ($group) {
+      print_r('Successfully deleted ' . $group->group_name."\n"); 
+      field_group_group_export_delete($group, FALSE);
+    }
+    else {
+      print_r('couldndt find '.$group_name.'!!!!!!!!!!!!!!!');
+    }
+  }
+
+  
+}
+
+function pcm_rollout_set_variables() {
+  global $pcm_site;
+  
+  if (isset($pcm_site) && $pcm_site == 'live') {
+    $address = "http://10.0.100.251";
+  }
+  else {
+    $address = "http://10.0.100.253";
+  }
+
+
+  $array = array(
+		 'site_frontpage' => 'start',
+		 'cablecast_api_server_address' => $address,
+		 'cablecast_api_server_username' => 'admin',
+		 'cablecast_api_server_password' => 'trms',
+		 'cablecast_api_server_tz' => 'America/Los_Angeles',
+		 'cm_cablecast_push_airing_on_save' => 1,
+		 'cm_cablecast_push_project_on_save' => 1,
+		 'cm_cablecast_push_show_on_save' => 1,
+		 'cm_cablecast_alternate_show_form_field' => 'pcm_cm_show',
+		 );
+
+  foreach($array as $name => $value) {
+    variable_set($name, $value);
+    print_r("Set $name variable to $value\n");
+  }
+
+  $old = array(
+	       'cm_cablecast_server_address',
+	       'cm_cablecast_server_password',
+	       'cm_cablecast_server_username',
+	       'pcm_airings_cablecast_server_tz', 
+	       );
+
+  foreach($old as $name) {
+    variable_del($name);
+    print_r("Deleted $name variable\n");
+  }
+  
+}

@@ -1,0 +1,23 @@
+<?php
+
+
+/**
+ * Implements hook_install().
+ */
+function pcm_rollout_install() {
+  $actions = array(
+		   'pcm_rollout_field_collection_data_patch',
+		   'pcm_rollout_airing_show_field_type_change',
+		   'pcm_rollout_delete_producer_dashboard_page',
+		   );
+
+
+  foreach($actions as $action) {
+    $has_run = variable_get($action);
+    if (!$has_run || $has_run == 'no') {
+      call_user_func($action);
+      variable_set($action, 'yes');
+    }
+  }
+}
+
